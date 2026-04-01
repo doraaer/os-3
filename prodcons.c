@@ -5,6 +5,10 @@
  * Defne Uyguc (2078007)
  * Dora Er (2074478)
  * Tamer Yurtsever (2081350)
+ *
+ * Grading:
+ * Students who hand in clean code that fully satisfies the minimum requirements will get an 8. 
+ * Extra steps can lead to higher marks because we want students to take the initiative.
  */
 
 #include <stdio.h>
@@ -21,55 +25,74 @@
 
 static ITEM buffer[BUFFER_SIZE];
 
-static void rsleep (int t);
-static ITEM get_next_item (void);
+static void rsleep (int t);        
+static ITEM get_next_item (void);  
 
-// mutex + condition variables
-static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t cv_consumer = PTHREAD_COND_INITIALIZER;
-static pthread_cond_t producer_cvs[NROF_PRODUCERS];
+// one mutex for all shared stuff
+static pthread_mutex_t mutex       = PTHREAD_MUTEX_INITIALIZER;
 
-// buffer + ordering state
-static int buf_head = 0;
-static int buf_tail = 0;
-static int buf_count = 0;
+// consumer waits here if buffer is empty
+static pthread_cond_t  cv_consumer = PTHREAD_COND_INITIALIZER;
+
+// each producer has its own condition variable
+static pthread_cond_t  producer_cvs[NROF_PRODUCERS];
+
+// circular buffer bookkeeping
+static int  buf_head  = 0;   // write index
+static int  buf_tail  = 0;   // read index
+static int  buf_count = 0;   // how many items in buffer
+
+// enforce ascending order
 static ITEM next_produce = 0;
+
+// used to know when consumer is done
 static int items_consumed = 0;
 
-// track which producers are waiting and for what item
+// track which producers are waiting and what item they have
+// this lets us wake only the correct producer instead of all
 static bool producer_waiting[NROF_PRODUCERS];
 static ITEM waiting_item[NROF_PRODUCERS];
 
-// counters for advanced feature
-static unsigned long signal_count = 0;
+// just to count how many signals/broadcasts we do for the report
+static unsigned long signal_count    = 0;
 static unsigned long broadcast_count = 0;
 
-// signal consumer
-static void signal_consumer(void)
+
+// signal consumer when new item is available
+static void
+signal_consumer (void)
 {
-    pthread_cond_signal(&cv_consumer);
+    pthread_cond_signal (&cv_consumer);
     signal_count++;
 }
 
-// signal one producer
-static void signal_producer(int id)
+
+// signal one specific producer
+static void
+signal_producer (int id)
 {
-    pthread_cond_signal(&producer_cvs[id]);
+    pthread_cond_signal (&producer_cvs[id]);
     signal_count++;
 }
 
-// wake only the producer that has the next required item
-static void signal_interested_producer_if_possible(void)
+
+// wake only the producer that actually has the next needed item
+static void
+signal_interested_producer_if_possible (void)
 {
+    // if buffer is full no producer can continue anyway
     if (buf_count == BUFFER_SIZE)
+    {
         return;
+    }
 
+    // find the producer that is waiting with next_produce
     for (int i = 0; i < NROF_PRODUCERS; i++)
     {
         if (producer_waiting[i] && waiting_item[i] == next_produce)
         {
-            signal_producer(i);
-            return;
+            signal_producer (i);
+            return;   // only one producer can have this item
         }
     }
 }
@@ -87,14 +110,17 @@ producer (void * arg)
         // * get the new item
         ITEM item = get_next_item();
 
+        // stop when there are no more items
         if (item == NROF_ITEMS)
+        {
             break;
-
-        rsleep (100);	// simulating all kind of activities...
+        }
 		
-	// TODO:
-	      // * put the item into buffer[]
-	//
+        rsleep (100);   // simulating all kind of activities...
+		
+        // TODO:
+        // * put the item into buffer[]
+        //
         // follow this pseudocode (according to the ConditionSynchronization lecture):
         //      mutex-lock;
         //      while not condition-for-this-producer
@@ -102,31 +128,40 @@ producer (void * arg)
         //      critical-section;
         //      possible-cv-signals;
         //      mutex-unlock;
+        //
+        // (see condition_test() in condition_basics.c how to use condition variables)
 
-        pthread_mutex_lock(&mutex);
+        pthread_mutex_lock (&mutex);
 
-        // wait until it's this item's turn and buffer has space
+        // wait if buffer full or if it's not this item's turn yet
         while (item != next_produce || buf_count == BUFFER_SIZE)
         {
             producer_waiting[id] = true;
             waiting_item[id] = item;
-            pthread_cond_wait(&producer_cvs[id], &mutex);
+            pthread_cond_wait (&producer_cvs[id], &mutex);
         }
 
+        // this producer can continue now, so it is no longer waiting
         producer_waiting[id] = false;
+        waiting_item[id] = NROF_ITEMS;
 
-        // insert item into circular buffer
+        // put item into circular buffer
         buffer[buf_head] = item;
-        buf_head = (buf_head + 1) % BUFFER_SIZE;
+        buf_head  = (buf_head + 1) % BUFFER_SIZE;
         buf_count++;
+
+        // next item that should be inserted becomes one bigger
         next_produce++;
 
-        signal_consumer(); // notify consumer
-        signal_interested_producer_if_possible(); // wake correct producer
+        // buffer is not empty anymore, so consumer can continue
+        signal_consumer();
 
-        pthread_mutex_unlock(&mutex);
+        // maybe the next correct producer can continue now too
+        signal_interested_producer_if_possible();
+
+        pthread_mutex_unlock (&mutex);
     }
-	return (NULL);
+    return (NULL);
 }
 
 /* consumer thread */
@@ -138,8 +173,8 @@ consumer (void * arg)
     while (true /* TODO: not all items retrieved from buffer[] */)
     {
         // TODO: 
-	      // * get the next item from buffer[]
-	      // * print the number to stdout
+        // * get the next item from buffer[]
+        // * print the number to stdout
         //
         // follow this pseudocode (according to the ConditionSynchronization lecture):
         //      mutex-lock;
@@ -149,80 +184,182 @@ consumer (void * arg)
         //      possible-cv-signals;
         //      mutex-unlock;
 
-        pthread_mutex_lock(&mutex);
+        pthread_mutex_lock (&mutex);
 
-        // wait while buffer empty
+        // wait if buffer is empty and we are not done yet
         while (buf_count == 0 && items_consumed < NROF_ITEMS)
         {
-            pthread_cond_wait(&cv_consumer, &mutex);
+            pthread_cond_wait (&cv_consumer, &mutex);
         }
 
+        // stop when all items were already consumed
         if (items_consumed == NROF_ITEMS)
         {
-            pthread_mutex_unlock(&mutex);
+            pthread_mutex_unlock (&mutex);
             break;
         }
 
-        // remove item from buffer
+        // take next item from circular buffer
         ITEM item = buffer[buf_tail];
-        buf_tail = (buf_tail + 1) % BUFFER_SIZE;
+        buf_tail  = (buf_tail + 1) % BUFFER_SIZE;
         buf_count--;
         items_consumed++;
 
-        signal_interested_producer_if_possible(); // maybe next producer can go
+        // one buffer slot got free, so maybe the right producer can continue now
+        signal_interested_producer_if_possible();
 
-        pthread_mutex_unlock(&mutex);
+        pthread_mutex_unlock (&mutex);
 
-        rsleep (100);		// simulating all kind of activities...
+        rsleep (100);   // simulating all kind of activities...
 
-        printf("%d\n", item);
+        printf ("%d\n", item);
     }
-	return (NULL);
+    return (NULL);
 }
 
 int main (void)
 {
     // TODO: 
     // * startup the producer threads and the consumer thread
-    // * wait until all threads are finished  
+    // * wait until all threads are finished
 
     pthread_t producers[NROF_PRODUCERS];
     pthread_t cons;
     int producer_ids[NROF_PRODUCERS];
 
+    // initialize producer condition variables and bookkeeping
     for (int i = 0; i < NROF_PRODUCERS; i++)
     {
-        pthread_cond_init(&producer_cvs[i], NULL);
+        pthread_cond_init (&producer_cvs[i], NULL);
         producer_waiting[i] = false;
         waiting_item[i] = NROF_ITEMS;
         producer_ids[i] = i;
     }
 
-    pthread_create(&cons, NULL, consumer, NULL);
+    // start consumer
+    pthread_create (&cons, NULL, consumer, NULL);
 
+    // start producers
     for (int i = 0; i < NROF_PRODUCERS; i++)
     {
-        pthread_create(&producers[i], NULL, producer, &producer_ids[i]);
+        pthread_create (&producers[i], NULL, producer, &producer_ids[i]);
     }
 
+    // wait for all producers
     for (int i = 0; i < NROF_PRODUCERS; i++)
     {
-        pthread_join(producers[i], NULL);
+        pthread_join (producers[i], NULL);
     }
 
-    pthread_mutex_lock(&mutex);
-    signal_consumer(); // ensure consumer can exit
-    pthread_mutex_unlock(&mutex);
+    // wake consumer once more in case it is sleeping at the very end
+    pthread_mutex_lock (&mutex);
+    signal_consumer();
+    pthread_mutex_unlock (&mutex);
 
-    pthread_join(cons, NULL);
+    // wait for consumer
+    pthread_join (cons, NULL);
 
+    // clean up producer condition variables
     for (int i = 0; i < NROF_PRODUCERS; i++)
     {
-        pthread_cond_destroy(&producer_cvs[i]);
+        pthread_cond_destroy (&producer_cvs[i]);
     }
 
-    fprintf(stderr, "signals    : %lu\n", signal_count);
-    fprintf(stderr, "broadcasts : %lu\n", broadcast_count);
+    // print stats for advanced feature
+    fprintf (stderr, "signals    : %lu\n", signal_count);
+    fprintf (stderr, "broadcasts : %lu\n", broadcast_count);
 
     return (0);
+}
+
+/*
+ * rsleep(int t)
+ *
+ * The calling thread will be suspended for a random amount of time between 0 and t microseconds
+ * At the first call, the random generator is seeded with the current time
+ */
+static void 
+rsleep (int t)
+{
+    static bool first_call = true;
+    
+    if (first_call == true)
+    {
+        srandom (time(NULL));
+        first_call = false;
+    }
+    usleep (random () % t);
+}
+
+
+/* 
+ * get_next_item()
+ *
+ * description:
+ *	thread-safe function to get a next job to be executed
+ *	subsequent calls of get_next_item() yields the values 0..NROF_ITEMS-1 
+ *	in arbitrary order 
+ *	return value NROF_ITEMS indicates that all jobs have already been given
+ * 
+ * parameters:
+ *	none
+ *
+ * return value:
+ *	0..NROF_ITEMS-1: job number to be executed
+ *	NROF_ITEMS:	 ready
+ */
+static ITEM
+get_next_item(void)
+{
+    static pthread_mutex_t  job_mutex   = PTHREAD_MUTEX_INITIALIZER;
+    static bool    jobs[NROF_ITEMS+1] = { false }; // keep track of issued jobs
+    static int     counter = 0;    // seq.nr. of job to be handled
+    ITEM           found;          // item to be returned
+	
+	/* avoid deadlock: when all producers are busy but none has the next expected item for the consumer 
+	 * so requirement for get_next_item: when giving the (i+n)'th item, make sure that item (i) is going to be handled (with n=nrof-producers)
+	 */
+	pthread_mutex_lock (&job_mutex);
+
+	counter++;
+	if (counter > NROF_ITEMS)
+	{
+	    // we're ready
+	    found = NROF_ITEMS;
+	}
+	else
+	{
+	    if (counter < NROF_PRODUCERS)
+	    {
+	        // for the first n-1 items: any job can be given
+	        // e.g. "random() % NROF_ITEMS", but here we bias the lower items
+	        found = (random() % (2*NROF_PRODUCERS)) % NROF_ITEMS;
+	    }
+	    else
+	    {
+	        // deadlock-avoidance: item 'counter - NROF_PRODUCERS' must be given now
+	        found = counter - NROF_PRODUCERS;
+	        if (jobs[found] == true)
+	        {
+	            // already handled, find a random one, with a bias for lower items
+	            found = (counter + (random() % NROF_PRODUCERS)) % NROF_ITEMS;
+	        }    
+	    }
+	    
+	    // check if 'found' is really an unhandled item; 
+	    // if not: find another one
+	    if (jobs[found] == true)
+	    {
+	        // already handled, do linear search for the oldest
+	        found = 0;
+	        while (jobs[found] == true)
+            {
+                found++;
+            }
+	    }
+	}
+    	jobs[found] = true;
+			
+	pthread_mutex_unlock (&job_mutex);
+	return (found);
 }
